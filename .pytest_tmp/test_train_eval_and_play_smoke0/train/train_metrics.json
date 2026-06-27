@@ -1,0 +1,12 @@
+{
+  "avg_episode_length": 25.5,
+  "base_seed": 44,
+  "episodes": 2,
+  "mean_return": -520.5,
+  "policy": "random",
+  "returns": [
+    -515.0,
+    -526.0
+  ],
+  "win_rate": 0.0
+}

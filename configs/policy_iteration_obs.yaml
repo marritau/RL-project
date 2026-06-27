@@ -1,0 +1,49 @@
+env:
+  layout_name: smallClassic
+  num_ghosts: 2
+  max_steps: 300
+  seed: 45
+  ghost_policy: random
+  ghost_loop_direction: clockwise
+  invalid_action_mode: raise
+  render_mode: null
+  zoom: 1.0
+  frame_time: 0.15
+  observation:
+    name: bitmask_distance_buckets
+    chunk_w: 4
+    chunk_h: 2
+    distance_bucket_size: 2
+  reward:
+    time_penalty: -1.0
+    food: 10.0
+    capsule: 0.0
+    eat_ghost: 200.0
+    win: 500.0
+    lose: -500.0
+    invalid_action: -5.0
+
+obs_encoding:
+  drop_keys: ["score", "step_count"]
+  float_round: 3
+
+obs_mdp:
+  episodes: 20000
+  seed_base: 45
+  policy_seed: 123
+  empirical_mdp_path: null
+
+policy_iteration:
+  gamma: 0.95
+  theta: 0.0001
+  max_eval_iters: 10
+  max_policy_iters: 50
+
+eval:
+  episodes: 200
+  seed_base: 10045
+
+paths:
+  train_output_dir: results/obs_policy_iteration
+  eval_output_dir: results/obs_policy_iteration_eval
+  model_path: results/obs_policy_iteration/policy.pkl

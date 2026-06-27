@@ -1,0 +1,26 @@
+{
+  "avg_episode_length": 54.5,
+  "avg_reward": -49.5,
+  "avg_score": 410.5,
+  "base_seed": 42,
+  "episode_lengths": [
+    43,
+    66
+  ],
+  "episodes": 2,
+  "loss_rate": 0.5,
+  "policy": "baseline",
+  "returns": [
+    -543.0,
+    444.0
+  ],
+  "scores": [
+    -163.0,
+    984.0
+  ],
+  "seeds": [
+    42,
+    43
+  ],
+  "win_rate": 0.5
+}

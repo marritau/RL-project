@@ -1,0 +1,42 @@
+train:
+  agent_type: sarsa
+  episodes: 3000
+  seed: 42
+  epsilon_decay: 0.9995
+  epsilon_end: 0.05
+  agent_params:
+    alpha: 0.1
+    gamma: 0.99
+    epsilon: 1.0
+    action_size: 5
+
+paths:
+  train_sarsa_output_dir: results/train_sarsa
+  eval_sarsa_output_dir: results/eval_sarsa
+  model_sarsa_path: results/train_sarsa/q_table.pkl
+
+env:
+  layout_name: smallClassic
+  num_ghosts: 2
+  max_steps: 500
+  seed: 42
+  ghost_policy: random
+  invalid_action_mode: raise
+  render_mode: null
+  zoom: 1.0
+  frame_time: 0.15
+  observation:
+    name: bitmask_distance_buckets
+    distance_bucket_size: 2
+  reward:
+    time_penalty: -1.0
+    food: 10.0
+    capsule: 0.0
+    eat_ghost: 200.0
+    win: 500.0
+    lose: -500.0
+    invalid_action: -5.0
+
+obs_encoding:
+  drop_keys: [score, step_count]
+  float_round: 3

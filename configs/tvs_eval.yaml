@@ -1,0 +1,36 @@
+# Temporal Vendi Score evaluation profile.
+# The script forces env.observation.name=raw because TVS needs Pacman's path and walls.
+# Recommended command:
+#   python scripts/evaluate_tvs.py --config configs/tvs_eval.yaml --policy baseline --episodes 128 --output-dir results/tvs_baseline
+
+env:
+  layout_name: smallClassic
+  num_ghosts: 2
+  max_steps: 500
+  seed: 42
+  ghost_policy: random
+  invalid_action_mode: raise
+  render_mode: null
+  zoom: 1.0
+  frame_time: 0.15
+  observation:
+    name: raw
+  reward:
+    time_penalty: -1.0
+    food: 10.0
+    capsule: 0.0
+    eat_ghost: 200.0
+    win: 500.0
+    lose: -500.0
+    invalid_action: -5.0
+
+tvs_eval:
+  paper: "Beyond Reward Maximization: Evaluating the Diversity of Trajectories in Reinforcement Learning with Temporal Vendi Score"
+  openreview_url: "https://openreview.net/forum?id=7qGCADaXjr"
+  pdf_url: "https://openreview.net/pdf/4b56e283f49a8cc5a6271a62bc723a09aefd088d.pdf"
+  recommended_episodes: 128
+  band_ratio: 0.2
+  vendi_order_q: 2
+  quality_filter: wins_or_all
+  max_points_per_trajectory: 160
+  state_projection: pacman_grid_position

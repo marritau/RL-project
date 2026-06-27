@@ -1,0 +1,58 @@
+env:
+  layout_name: smallClassic
+  num_ghosts: 1
+  max_steps: 500
+  seed: 42
+  ghost_policy: random
+  ghost_loop_direction: clockwise
+  ghost_loop_matrix:
+    - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    - [0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0]
+    - [0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0]
+    - [0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0]
+    - [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
+    - [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0]
+    - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  invalid_action_mode: raise
+  render_mode: null
+  zoom: 1.0
+  frame_time: 0.15
+  observation:
+    name: food_bitmask
+    chunk_w: 4
+    chunk_h: 2
+    distance_bucket_size: 2
+  reward:
+    time_penalty: -1.0
+    food: 10.0
+    capsule: 0.0
+    eat_ghost: 200.0
+    win: 500.0
+    lose: -500.0
+    invalid_action: -5.0
+
+collection:
+  episodes: 2500
+  base_seed: 42
+  progress_every: 100
+  max_steps_per_episode: null
+  epsilon_random: 0.35
+  danger_distance: 2
+
+planner_food_bitmask_vi:
+  gamma: 0.99
+  tolerance: 1.0e-6
+  max_iterations: 750
+  progress_every: 25
+
+eval_food_bitmask_vi:
+  episodes: 200
+  base_seed: 42
+  render_mode: null
+  gif_title: food_bitmask_vi_demo
+
+paths:
+  train_food_bitmask_vi_output_dir: results/train_food_bitmask_vi
+  eval_food_bitmask_vi_output_dir: results/eval_food_bitmask_vi
+  model_food_bitmask_vi_path: results/train_food_bitmask_vi/model.pkl
+  important_output_dir: results/important
