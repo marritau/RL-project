@@ -1,597 +1,928 @@
-# Pacman RLDP
+# Temporal Vendi Score for RL Trajectory Diversity
 
-Pacman RLDP is a team project workspace for dynamic programming (DP) and reinforcement learning experiments on a Pacman runtime.
+This project studies how to evaluate reinforcement learning agents not only by reward, win rate, or episode length, but also by the **diversity of trajectories** they generate.
 
-## Quick Start
-Setup:
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e .
-```
-### Examples
-Run train / eval / visualize:
-```bash
-# Policy Iteration (empirical MDP on observations)
-python scripts/train.py pi --config configs/policy_iteration_obs.yaml
-python scripts/eval.py  pi --config configs/policy_iteration_obs.yaml
-python scripts/play.py  pi --render-mode human
+The main research question is:
 
-# Value Iteration (food-bitmask)
-python scripts/train.py vi --config configs/bitmask_value_iteration.yaml
-python scripts/eval.py  vi --config configs/bitmask_value_iteration.yaml
-python scripts/play.py  vi --render-mode human
+> Do different RL methods solve the same task through genuinely different behavioral strategies, or do they mostly repeat the same trajectory pattern?
 
-# Q-learning / SARSA
-python scripts/train.py q_learning --config configs/default.yaml --episodes 1000
-python scripts/train.py sarsa      --config configs/default.yaml --episodes 1000
-python scripts/play.py  q_learning --render-mode human
-```
+To answer this, the project implements and evaluates the **Temporal Vendi Score (TVS)**, a trajectory-diversity metric proposed in:
 
-Manual play:
-```bash
-python scripts/play.py manual --config configs/default.yaml --render-mode human
-python scripts/play.py manual --config configs/default.yaml --render-mode ansi
-```
+**Beyond Reward Maximization: Evaluating the Diversity of Trajectories in Reinforcement Learning with Temporal Vendi Score**
+OpenReview: https://openreview.net/forum?id=7qGCADaXjr
+PDF: https://openreview.net/pdf?id=7qGCADaXjr
 
-## Problem Definition
-- Task: control Pacman to collect all food while avoiding ghosts.
-- Agent objective: maximize cumulative episodic return.
-- Environment dynamics: turn-based sequence where Pacman acts first, then each ghost acts.
-- Transition type: **stochastic by default** because ghost actions are sampled uniformly from legal actions.
+Pacman is used as a controlled grid-world benchmark environment. It provides a compact but non-trivial setting with walls, food, ghosts, stochastic dynamics, and multiple possible routes. The goal of the project is not only to make Pacman agents achieve high reward, but to compare how different RL and planning methods behave under both standard performance metrics and trajectory-diversity metrics.
 
-## Environment Specification
-Primary API: `pacman_rldp.env.PacmanEnv` (Gymnasium-style).
+---
 
-### State Representation (`ObsDict`)
-`reset()` and `step()` return a structured observation dictionary.
-Default (`env.observation.name: raw`) fields:
-- `pacman_position`: `(2,)` float32
-- `ghost_positions`: `(num_ghosts, 2)` float32 (`-1` padding for absent slots)
-- `ghost_timers`: `(num_ghosts,)` int32
-- `ghost_present`: `(num_ghosts,)` binary
-- `walls`: `(width, height)` int8 binary
-- `food`: `(width, height)` int8 binary
-- `capsules`: `(width, height)` int8 binary
-- `score`: `(1,)` float32
-- `step_count`: `(1,)` int32
+## Project overview
 
-### Observation Registry
-Observation format is configurable through `env.observation.name`:
-- `raw` (default): full grids (`walls/food/capsules`) + agent features.
-- `chunked_food`: chunk-level binary food map + full local maps for Pacman's current chunk.
-- `food_bitmask`: one integer food bitmask over walkable (non-wall) cells.
-- `bitmask_distance_buckets`: `food_bitmask` + bucketized nearest-food/nearest-ghost distances and coarse directions.
+The project compares several policy families:
 
-Config block (in `configs/default.yaml`):
-```yaml
-env:
-  observation:
-    name: raw
-    chunk_w: 4
-    chunk_h: 2
-    distance_bucket_size: 2
+* heuristic baseline policy;
+* random policy;
+* tabular Q-learning;
+* SARSA;
+* empirical Value Iteration;
+* empirical Policy Iteration.
+
+For each policy, we evaluate:
+
+1. standard RL performance:
+
+   * win rate;
+   * mean return;
+   * mean score;
+   * mean episode length;
+
+2. trajectory diversity:
+
+   * Temporal Vendi Score;
+   * trajectory similarity matrix;
+   * TVS convergence;
+   * occupancy heatmap;
+   * trajectory overlay;
+   * coverage and occupancy entropy comparison.
+
+The key point is that **high reward and high diversity are not the same thing**. A random policy can have very diverse trajectories while failing the task completely. A strong planner can win more often but follow fewer behavioral modes. TVS helps make this trade-off visible.
+
+---
+
+## Methodological basis
+
+The project follows the TVS evaluation idea from the paper:
+
+1. sample trajectories from a trained policy;
+2. compute pairwise temporal distances between states;
+3. compute trajectory similarity with a banded Global Alignment Kernel;
+4. normalize the trajectory similarity matrix;
+5. compute q=2 Vendi Score from the eigenvalues of the normalized similarity matrix.
+
+In this project, a trajectory is represented as an ordered sequence of Pacman grid positions:
+
+```text
+tau = [s_0, s_1, s_2, ..., s_T]
 ```
 
-Bitmask encoding rule (deterministic):
-- only non-wall cells are encoded,
-- canonical order is row-major by map rows top-to-bottom, then left-to-right within each row.
+where each state projection is Pacman's position on the layout grid.
 
+This intentionally focuses TVS on **route diversity**: how differently agents move through the maze structure. Full Pacman state diversity, including food map, ghost timers, score, and capsules, would require a much larger state-distance model and is outside the scope of this implementation.
 
-### Action Space
-- `action_space = Discrete(5)`
-- Mapping:
-  - `0 -> North`
-  - `1 -> South`
-  - `2 -> East`
-  - `3 -> West`
-  - `4 -> Stop`
+---
 
-### Transition Logic
-For one `step(action)`:
-1. Pacman action is applied (or rejected according to `invalid_action_mode`).
-2. Ghosts respond sequentially.
-3. Episode ends on win/loss (`terminated=True`) or max-step limit (`truncated=True`).
+## Temporal Vendi Score implementation
 
-### Ghost Strategy (Default)
-- Config key: `env.ghost_policy`.
-- Current supported default: `random`.
-- `random` policy means each ghost samples uniformly from its legal actions at its turn.
-- Ghost movement rules are as follows:
-  - ghost cannot choose `Stop` (except edge-case when no alternatives),
-  - ghost usually avoids immediate reverse direction unless forced by map topology.
-- Result: transition dynamics are stochastic and reproducible under fixed seed.
+The implementation uses the following components.
 
-### Ghost Strategy (`markovian`)
-- Set `env.ghost_policy: markovian` for uniform one-step Markov transitions.
-- At each ghost turn:
-  - all legal non-`Stop` neighbor transitions are sampled with equal probability,
-  - `Stop` transition has probability `0` (unless no move is available).
-- This policy is stochastic and reproducible under fixed seed.
+### 1. Trajectory sampling
 
-### Ghost Strategy (`loop_path`)
-- Set `env.ghost_policy: loop_path` for deterministic ghost patrol.
-- Additional config:
-  - `ghost_loop_matrix`: `0/1` matrix (row-major, top-to-bottom) with `1` for loop cells.
-  - `ghost_loop_direction`: `clockwise` or `anticlockwise`.
-- Validation rules:
-  - matrix shape must match layout size,
-  - values must be only `0` or `1`,
-  - all `1` cells must be non-wall cells,
-  - `1` cells must form one closed simple cycle (degree 2 at each path node).
-- Multi-ghost behavior:
-  - all ghosts use the same single loop,
-  - initial loop indices are evenly spaced along that loop.
-- If a ghost spawn is off-loop, it is snapped to nearest loop node for loop indexing.
-- Dynamics are deterministic (independent of RNG) once loop policy is active.
+For a policy `pi`, the evaluator runs multiple episodes and stores the ordered sequence of Pacman positions:
 
-### What The Agent Observes
-- The environment is **fully observable** in the provided observation dictionary.
-- Pacman directly receives:
-  - exact Pacman position,
-  - exact ghost positions and scared timers,
-  - full wall grid,
-  - full food grid,
-  - full capsule map,
-  - current score and step count.
-- No hidden-state belief model is required for baseline DP experiments.
-- Auxiliary `info` returned by `step()` includes legal action IDs and episode flags (`is_win`, `is_lose`).
+```text
+trajectory = [(x_0, y_0), (x_1, y_1), ..., (x_T, y_T)]
+```
 
-### Episode End Conditions
-- **Termination**:
-  - Win: all food consumed.
-  - Loss: Pacman collides with a non-scared ghost.
-- **Truncation**:
-  - `step_count >= max_steps`.
+The evaluator also records:
 
-### Reward Function (Default)
-Configured in `configs/default.yaml` under `env.reward`.
+* total return;
+* game score;
+* episode length;
+* win/loss flag;
+* whether the trajectory was selected for scoring.
 
-| Event | Reward |
-|---|---:|
-| Time step penalty | `-1.0` |
-| Food eaten | `+10.0` |
-| Capsule eaten | `+0.0` |
-| Ghost eaten | `+200.0` |
-| Win | `+500.0` |
-| Lose | `-500.0` |
-| Invalid action | `-5.0` |
+By default, for meaningful policies the project scores successful trajectories when enough wins are available. This keeps the interpretation close to:
 
+> diversity of useful or successful behavior.
 
-## Results & Artifacts by Algorithm
+For random policy, all trajectories are scored because the policy usually does not win.
 
-### Baseline
-**Formula**
+---
 
-$$
-d_{\text{ghost}}(s)=\min_g \left\lVert p_{\text{pac}}(s)-p_g(s)\right\rVert_1
-$$
+### 2. Time-to-reach distance
 
-$$
-a_{\text{escape}}^*(s)=\arg\max_{a\in A_{\text{legal}}}\ \min_g \left\lVert p'_{\text{pac}}(s,a)-p_g(s)\right\rVert_1
-$$
+The local state distance is the shortest path distance through the Pacman maze.
 
-$$
-a_{\text{food}}^*(s)=\text{first action on BFS shortest path to nearest food}
-$$
+For two grid cells `s` and `s'`, the time-to-reach distance is:
 
-**GIFs / Visual Rollouts**
+```text
+d(s, s') = minimum number of legal moves required to reach s' from s
+```
 
-Loop-path baseline:
+The implementation computes this exactly with BFS over walkable cells:
 
-![loop2_baseline](results/important/loop2_baseline.gif)
+* walls are excluded;
+* each move has unit cost;
+* legal moves are North, South, East, West;
+* unreachable pairs receive a large finite fallback distance.
 
-Markovian baseline:
+This gives a distance that respects the environment geometry. Two cells may be close in Euclidean coordinates but far in practice if a wall separates them.
 
-![markov1_baseline](results/important/markov1_baseline.gif)
+---
 
-Random-policy baseline:
+### 3. Local similarity kernel
 
-![game1_baseline](results/important/game1_baseline.gif)
+For two states, the local similarity is:
 
-**Metrics**
+```text
+kappa(s, s') = exp(-d(s, s') / sigma)
+```
 
-Source: `results/eval/eval_metrics.json` (baseline policy)
-- Episodes: `200` (seed schedule: `42 + i`)
-- Win rate: `0.575`
-- Average reward: `21.535`
-- Average episode length: `69.215`
-- Data representation: **Non-tabular** (rule-based heuristic)
+where `sigma` controls the bandwidth of the similarity kernel.
+
+The project calibrates `sigma` once per environment using the paper-style rule:
+
+```text
+sigma = median_trajectory_length * median_time_to_reach / ln(2)
+```
+
+For cross-method comparison, the same calibrated `sigma` is reused for all policies. This is important because TVS values should be comparable across agents evaluated in the same environment.
+
+---
+
+### 4. Global Alignment Kernel
+
+Trajectories are sequences, so the project compares them using a Global Alignment Kernel.
+
+For two trajectories:
+
+```text
+tau  = [s_1, ..., s_T]
+tau' = [s'_1, ..., s'_{T'}]
+```
+
+the kernel marginalizes over monotonic temporal alignments.
+
+The dynamic-programming recursion is:
+
+```text
+GA(i, j) = kappa(s_i, s'_j) * (GA(i-1, j-1) + GA(i-1, j) + GA(i, j-1))
+```
+
+To reduce computation and follow the paper setup, the implementation uses a 20% Sakoe-Chiba band:
+
+```text
+|i - j| <= 0.2 * max(T, T')
+```
+
+This keeps trajectory comparisons focused on approximately aligned temporal regions.
+
+---
+
+### 5. Kernel normalization
+
+The raw Global Alignment Kernel does not automatically satisfy:
+
+```text
+K(tau, tau) = 1
+```
+
+which is required for Vendi Score.
+
+Therefore, the pairwise trajectory kernel is normalized as:
+
+```text
+K_ij = GA(tau_i, tau_j) / sqrt(GA(tau_i, tau_i) * GA(tau_j, tau_j))
+```
+
+After normalization:
+
+```text
+K_ii = 1
+```
+
+for all trajectories.
+
+---
+
+### 6. q=2 Vendi Score
+
+The final Temporal Vendi Score is computed from the eigenvalues of the normalized similarity matrix.
+
+The project uses q=2:
+
+```text
+TVS = 1 / sum(lambda_i^2)
+```
+
+where `lambda_i` are the eigenvalues of `K / N`.
+
+This version of the Vendi Score estimates the effective number of dominant behavioral modes and is less sensitive to small superficial variations.
+
+Small negative eigenvalues caused by numerical or kernel PSD issues are clamped to zero before computing the score.
+
+---
+
+## Environment
+
+The project uses a Pacman grid-world environment with a Gymnasium-style API.
+
+Main task:
+
+> control Pacman to collect all food while avoiding ghosts.
+
+The environment is useful for trajectory-diversity analysis because:
+
+* the map contains walls and corridors;
+* several routes can lead to successful outcomes;
+* ghost movement makes the dynamics stochastic;
+* different policies can produce visibly different routes;
+* the grid structure allows exact shortest-path distances with BFS.
+
+---
+
+## Observation formats
+
+Observation representation is configurable.
+
+Supported observation modes include:
+
+| Observation name           | Description                                                                           |
+| -------------------------- | ------------------------------------------------------------------------------------- |
+| `raw`                      | Full observation dictionary with walls, food, capsules, ghosts, score, and step count |
+| `chunked_food`             | Chunk-level food representation plus local maps                                       |
+| `food_bitmask`             | Integer bitmask over walkable food cells                                              |
+| `bitmask_distance_buckets` | Food bitmask plus bucketized nearest-food and nearest-ghost features                  |
+
+The TVS metric itself uses Pacman's grid position as the state projection for trajectory comparison.
+
+---
+
+## Action space
+
+The environment uses five discrete actions:
+
+| ID | Action |
+| -: | ------ |
+|  0 | North  |
+|  1 | South  |
+|  2 | East   |
+|  3 | West   |
+|  4 | Stop   |
+
+---
+
+## Reward function
+
+Default reward configuration:
+
+| Event             | Reward |
+| ----------------- | -----: |
+| Time step penalty |   -1.0 |
+| Food eaten        |  +10.0 |
+| Capsule eaten     |   +0.0 |
+| Ghost eaten       | +200.0 |
+| Win               | +500.0 |
+| Lose              | -500.0 |
+| Invalid action    |   -5.0 |
+
+---
+
+## Implemented policies and algorithms
+
+### Random policy
+
+The random policy samples uniformly from legal actions.
+
+It is included as a diversity sanity check. Random behavior often produces high trajectory diversity but poor task performance.
+
+---
+
+### Heuristic baseline
+
+The baseline is a non-learning policy.
+
+It follows simple rules:
+
+1. if a ghost is nearby, move away from the closest dangerous ghost;
+2. otherwise, move toward the nearest food using BFS;
+3. avoid illegal moves;
+4. avoid Stop unless no better action exists.
+
+This policy is useful as a deterministic-ish reference point with moderate task performance and limited route diversity.
+
+---
 
 ### Q-learning
 
-Here we have two algorithms -- /scripts/q_obs_learning_agent_copy.py (actor-critic, approximate Q-learning) and q_table_learning_agent.py (classic tabular Q-learning).
+Q-learning learns an action-value function using the off-policy Bellman update:
 
-As large amount of features mentioned above haven't helped with the learning of both these agents (in case of approximate it was way too noisy, for tabular it exploded gradients, after using clipping it was still noisy and way too inefficient), I've decided to use more informative features for both variants.
+```text
+Q(s, a) <- Q(s, a) + alpha * [r + gamma * max_a' Q(s', a') - Q(s, a)]
+```
 
-**Features**
-- hit-wall — Whether Pacman’s next move hits a wall (0 or 1)
-- scared — At least one ghost is in scared mode (0 or 1)
-- eats-food — Pacman eats food on the next move (0 or 1)
-- closest-food — Distance to the nearest food (integer or -1 if unreachable)
-- food-nearby — Number of food pellets in a 3x3 area around the next position (integer)
-- ghost-distance — Distance to the nearest ghost (integer or -1 if none)
-- danger — A ghost is within distance ≤1 (0 or 1)
-- capsule-distance — Distance to the nearest capsule (integer or -1 if none)
-- stop — Action is Stop (0 or 1)
+The implementation uses tabular Q-values over compact encoded observations.
 
+Important details:
 
-**Policy**
+* actions are restricted to legal actions;
+* exploration uses epsilon-greedy action selection;
+* unseen states during evaluation use a heuristic fallback action;
+* model is saved as `q_table.pkl`.
 
-1) Tabular Q-learning Agent:
+Recommended config:
 
-Stores Q-values for each unique combination of feature values and action.
+```text
+configs/q_learning.yaml
+```
 
-Policy: For a given state, computes feature values for all legal actions, looks up Q-values in the table, and selects the action with the highest Q-value (breaks ties randomly).
-
-Exploration: With probability epsilon, chooses a random legal action.
-
-2) Approximate Q-learning Agent:
-
-Computes Q-value as a weighted sum of features: $Q(s, a) = w^\top f(s, a)$.
-
-Policy: For a given state, extracts features for all legal actions, computes Q-values using current weights, and selects the action with the highest Q-value (breaks ties randomly).
-
-Exploration: With probability epsilon, chooses a random legal action.
-
-
-**Formula**
-
-$$
-Q(s,a;\mathbf{w})=\mathbf{w}^{\top}\mathbf{f}(s,a)
-$$
-
-$$
-y=
-\begin{cases}
-r, & \text{terminal}\\
-r+\gamma\max_{a'}Q(s',a';\mathbf{w}), & \text{otherwise}
-\end{cases}
-$$
-
-$$
-\delta = y - Q(s,a;\mathbf{w}),\qquad
-w_i \leftarrow w_i + \alpha\,\delta\,f_i(s,a)
-$$
-
-**Quickstart**
-
-Use `--render` flag only if you want to see the agent in action.
-
-1) Tabular:
-
-- Training (it is advised to just use q_table.pkl)
-
-`python scripts/q_table_learning_agent.py --train --episodes 10000 --config configs/default.yaml`
-
-- Evaluation 
-`python scripts/q_table_learning_agent.py --eval --model q_table.pkl --episodes 200 --config configs/default.yaml --render`
-
-2) Approximate Q-learning
-
-- Training
-`python scripts/q_obs_learning_agent_copy.py --train --episodes 10000 --config configs/default.yaml`
-
-- Evaluation
-`python scripts/q_obs_learning_agent_copy.py --eval --model q_obs_weights_copy.pkl --episodes 200 --config configs/default.yaml --render`
-
-## Tabular Q-learning metrics
-
-**Training**
-- Collected episodes: `60000`
-- Unique feature-action pairs (Q-table size): `17836`
-
-**Evaluation** 
-- Episodes: `200` (base seed `42`)
-- Win rate: `0.59`
-- Mean total reward: `28.3`
-- Mean score: `410.2`
-- Data representation: **Tabular (feature-based)**
-![CS188 Pacman 2026-03-16 19-11-30](https://github.com/user-attachments/assets/3e886495-a470-42b3-aa04-37315f94c77e)
 ---
 
-**Approximate Q-learning metrics**
+### SARSA
 
-**Training**
-- Collected episodes: `10000`
-- Feature weights: `9` (linear function approximation)
-- Collection mean total reward: `-110.7`
+SARSA learns an action-value function using the on-policy update:
 
-**Evaluation** 
-- Episodes: `200` (base seed `42`)
-- Win rate: `0.72`
-- Mean total reward: `45.1`
-- Mean score: `480.8`
-- Data representation: **Linear function approximation**
-![CS188 Pacman 2026-03-16 05-41-06 (online-video-cutter com) (1)](https://github.com/user-attachments/assets/7fa68473-97e4-4adb-8ed2-3da808f4dd68)
-
-### Value Iteration (food-bitmask empirical VI)
-**Formula**
-
-$$
-\hat{P}(s'|s,a)=\frac{N(s,a,s')}{N(s,a)}
-$$
-
-$$
-\hat{R}(s,a,s')=\frac{\sum \text{rewards}(s,a,s')}{N(s,a,s')}
-$$
-
-$$
-Q_k(s,a)=\sum_{s'}\hat{P}(s'|s,a)\left[\hat{R}(s,a,s')+\gamma V_{k-1}(s')\right]
-$$
-
-$$
-V_k(s)=\max_a Q_k(s,a),\qquad
-\pi(s)=\arg\max_a Q_k(s,a)
-$$
-
-$$
-\text{residual}_k=\max_s\left|V_k(s)-V_{k-1}(s)\right|
-$$
-
-**GIFs / Curves**
-
-Fast/high-return VI rollout:
-
-![fast_high_return_VI](results/important/fast_high_return_VI.gif)
-
-Best overall VI rollout:
-
-![best_overall_VI](results/important/best_overall_VI.gif)
-
-VI training reward curve:
-
-![train_bitmask_vi_reward_curve](results/important/train_bitmask_vi_reward_curve.png)
-
-**Metrics**
-
-Training source: `results/important/train_bitmask_vi_metrics.json`
-- Collected episodes: `2500`
-- Discovered states: `136415`
-- Transition samples: `217329`
-- VI iterations: `750`
-- Final Bellman residual: `0.0706064815`
-- Collection mean return: `-183.1356`
-
-Evaluation source: `results/important/eval_bitmask_vi_metrics.json`
-- Episodes: `200` (base seed `42`)
-- Win rate: `0.6`
-- Mean return: `31.715`
-- Mean score: `475.915`
-- Mean steps: `138.785`
-- Best episode return: `719.0` (seed `83`)
-- Data representation: **Tabular** over aggregated food-bitmask observation states.
-
-### SARSA 
-## Algorithm
-
-The canonical update rule:
-
-$$Q(s, a) \leftarrow Q(s, a) + \alpha \left[ r + \gamma \cdot Q(s', a') - Q(s, a) \right]$$
-
-where:
-- $s, a$ — current state and action
-- $r$ — received reward (including reward shaping)
-- $s', a'$ — next state and the **actually selected** next action
-- $\alpha$ — learning rate
-- $\gamma$ — discount factor
-
-At episode termination (`terminated=True`), $Q(s', a') = 0$ is assumed.
-
-### Agent Parameters
-
-| Parameter | Value | Description |
-|---|---|---|
-| `alpha` | `0.1` | Learning rate. Controls how strongly new information overwrites old estimates. |
-| `gamma` | `0.99` | Discount factor. Close to 1 means the agent values long-term reward highly. |
-| `epsilon` | `1.0` | Initial probability of a random action (exploration). Starts at full randomness. |
-| `action_size` | `5` | Number of available actions in the environment. |
-
-### Training Parameters
-
-| Parameter | Value | Description |
-|---|---|---|
-| `episodes` | `3000` | Number of training episodes. |
-| `epsilon_decay` | `0.9995` | Exponential decay multiplier applied to epsilon after each episode. |
-| `epsilon_end` | `0.05` | Lower bound for epsilon. The agent always retains a minimum level of exploration. |
-
-## Action Selection Strategy
-
-The agent uses an **ε-greedy** strategy with a legal action mask:
-
-1. With probability `epsilon` — a random action is chosen from the set of legal actions (`legal_action_ids`).
-2. Otherwise — the action with the highest Q-value among legal actions is chosen; ties are broken randomly.
-
-Epsilon decay is applied after each episode:
-
-```
-epsilon = max(epsilon_end, epsilon * epsilon_decay)
+```text
+Q(s, a) <- Q(s, a) + alpha * [r + gamma * Q(s', a') - Q(s, a)]
 ```
 
-**GIFs / Curves**
+The key difference from Q-learning is that SARSA bootstraps from the **actually selected next action** `a'`, not from the maximum action.
 
-- Qualitative artifact (gif/mp4): `TBD`
-- Training curve: `TBD`
+Important details:
 
-**Metrics**
+* actions are restricted to legal actions;
+* exploration uses epsilon-greedy action selection;
+* epsilon decays during training;
+* unseen states during evaluation use a heuristic fallback action;
+* model is saved as `q_table.pkl`.
 
-- Metrics summary: `TBD`
-- Data representation: **Tabular** (`q_table` dictionary).
+Recommended config:
 
-### Policy Iteration (Empirical Observation MDP)
-We build an empirical MDP over aggregated observations and run classic policy iteration.
-
-**Empirical model**
-
-$$
-\hat{P}(s'\mid s,a)=\frac{N(s,a,s')}{N(s,a)},\qquad
-\hat{R}(s,a,s')=\frac{1}{N(s,a,s')}\sum_{i=1}^{N(s,a,s')} r_i
-$$
-
-**Policy evaluation**
-
-$$
-V(s)\leftarrow \sum_{s'} \hat{P}(s'\mid s,\pi(s))\,[\hat{R}(s,\pi(s),s')+\gamma V(s')]
-\quad \text{until} \quad
-\max_s |V_{\text{new}}(s)-V_{\text{old}}(s)|<\theta
-$$
-
-**Policy improvement**
-
-$$
-\pi_{\text{new}}(s)=\arg\max_a \sum_{s'} \hat{P}(s'\mid s,a)\,[\hat{R}(s,a,s')+\gamma V(s')]
-$$
-
-**Results**
-- Win rate: **54%**
-
-**Artifacts**
-
-![best_pi](results/important/best_pi.gif)
-
-![policy_iteration_curve](results/important/policy_iteration_curve.png)
-
-
-## Algorithm and Visualization Review
-
-A second pass checked the original Q-learning, SARSA, Value Iteration, and Policy Iteration implementations in addition to the new TVS metric.  Notes are in `docs/ALGORITHM_AND_VISUAL_CHECK.md`.  The most important fixes are:
-
-- SARSA now uses `configs/sarsa.yaml` by default and applies `epsilon_decay` / `epsilon_end`.
-- SARSA was tested to bootstrap from the actually selected next action `a'`, not `max_a Q(s',a)`.
-- Q-learning/SARSA saved model paths now match eval/play defaults.
-- GIF capture now records only the Pacman Tk canvas.  For `smallClassic` at `zoom: 1.0`, the expected frame is `630 x 275`, not the full `2520 x 1680` desktop.
-
-## GIF Export
-`scripts/play.py` saves GIF from human visualization (`--render-mode human`).
-Output directory: `results/important/`.
-- Custom filename:
-```bash
-python scripts/play.py pi --render-mode human --gif-title my_run
-```
-- Disable GIF export:
-```bash
-python scripts/play.py pi --render-mode human --no-gif
-```
-- Default filename (if `--gif-title` is omitted): `experiment_{local_time}.gif`
-- `--render-mode ansi` does not export GIF.
-
-## DP Scaffold Interfaces
-- `pacman_rldp.algorithms.MDPModel`
-- `pacman_rldp.algorithms.TransitionOutcome`
-- `pacman_rldp.algorithms.PacmanMDPAdapter`
-
-These provide model-first abstractions (state encoding, legal actions, transition outcomes, reward, terminal checks) for teammate DP solver implementations.
-
-## Project Structure
-- `src/pacman_rldp/third_party/bk/`: environment core, rendering, keyboard control, layouts.
-- `src/pacman_rldp/env/`: Gymnasium environment wrapper.
-- `src/pacman_rldp/algorithms/`: DP model interfaces and adapter.
-- `src/pacman_rldp/agents/`: baseline random/manual policies.
-- `scripts/`: train/eval/play entrypoints.
-- `configs/`: reproducible experiment configuration.
-
-
-## Temporal Vendi Score Extension
-
-This fork adds a project extension for the paper:
-
-**Beyond Reward Maximization: Evaluating the Diversity of Trajectories in Reinforcement Learning with Temporal Vendi Score**  
-OpenReview: https://openreview.net/forum?id=7qGCADaXjr  
-PDF: https://openreview.net/pdf/4b56e283f49a8cc5a6271a62bc723a09aefd088d.pdf
-
-The new code evaluates not only reward/win rate, but also whether a policy reaches good outcomes through genuinely different trajectories.
-
-Run baseline-policy TVS:
-
-```bash
-python scripts/evaluate_tvs.py \
-  --config configs/tvs_eval.yaml \
-  --policy baseline \
-  --episodes 128 \
-  --seed 42 \
-  --output-dir results/tvs_baseline \
-  --save-trajectories
+```text
+configs/sarsa.yaml
 ```
 
-Run random-policy TVS:
+---
 
-```bash
-python scripts/evaluate_tvs.py \
-  --config configs/tvs_eval.yaml \
-  --policy random \
-  --episodes 128 \
-  --seed 42 \
-  --quality-filter all \
-  --output-dir results/tvs_random
+### Value Iteration
+
+The Value Iteration agent builds an empirical MDP from collected transitions and then performs Bellman optimality updates.
+
+Empirical transition model:
+
+```text
+P_hat(s' | s, a) = N(s, a, s') / N(s, a)
 ```
 
-Main outputs:
+Empirical reward model:
 
-- `tvs_metrics.json`
-- `similarity_matrix.npy`
-- `similarity_matrix.png`
-- `occupancy_heatmap.png`
-- `tvs_convergence.json`
-- `tvs_convergence.png`
-
-Implementation notes:
-
-- The Pacman state projection for TVS is Pacman's grid position.
-- Time-to-reach distance is exact shortest-path distance through layout walls.
-- Trajectory similarity uses the paper-style banded Global Alignment Kernel with the 20% Sakoe-Chiba rule `|i-j| <= 0.2 * max(T,T')`.
-- The bandwidth `sigma` is calibrated with the paper's Appendix A.1 rule: `sigma = median_length * median_time_to_reach / ln(2)`.
-- Consecutive repeated states are kept by default to preserve temporal sequence information; `--compress-repeats` is optional.
-- The final diversity score is q=2 Vendi Score, matching the paper's main experiments.
-- See `docs/PROJECT_REVIEW_TVS.md` for the full project review, limitations, and next improvements.
-
-## Temporal Vendi Score Full Integration
-
-The project now includes full TVS evaluation for every implemented policy family: `baseline`, `random`, `q_learning`, `sarsa`, `vi`, and `pi`.
-
-Paper: **Beyond Reward Maximization: Evaluating the Diversity of Trajectories in Reinforcement Learning with Temporal Vendi Score**  
-OpenReview: https://openreview.net/forum?id=7qGCADaXjr
-
-Run TVS for one trained policy:
-
-```powershell
-.\.venv\Scripts\python.exe scripts\evaluate_tvs.py --policy vi --episodes 256 --seed 42 --output-dir results\tvs_vi --save-trajectories
+```text
+R_hat(s, a, s') = average observed reward for transition (s, a, s')
 ```
 
-Run TVS for all supported policies and create one comparison table:
+Value update:
 
-```powershell
-.\.venv\Scripts\python.exe scripts\evaluate_all_tvs.py --episodes 256 --seed 42 --output-dir results\tvs_all --save-trajectories
+```text
+Q_k(s, a) = sum_s' P_hat(s' | s, a) * [R_hat(s, a, s') + gamma * V_{k-1}(s')]
+V_k(s) = max_a Q_k(s, a)
 ```
 
-The summary is saved to:
+The resulting policy chooses:
+
+```text
+pi(s) = argmax_a Q(s, a)
+```
+
+Recommended config:
+
+```text
+configs/bitmask_value_iteration.yaml
+```
+
+---
+
+### Policy Iteration
+
+Policy Iteration also uses an empirical MDP.
+
+It alternates between:
+
+1. policy evaluation;
+2. policy improvement.
+
+Policy evaluation:
+
+```text
+V(s) <- sum_s' P_hat(s' | s, pi(s)) * [R_hat(s, pi(s), s') + gamma * V(s')]
+```
+
+Policy improvement:
+
+```text
+pi_new(s) = argmax_a sum_s' P_hat(s' | s, a) * [R_hat(s, a, s') + gamma * V(s')]
+```
+
+Recommended config:
+
+```text
+configs/policy_iteration_obs.yaml
+```
+
+---
+
+## Current experimental results
+
+The following results are from completed runs and are used in the final project analysis.
+
+### Standard RL evaluation
+
+| Method           | Eval episodes | Win rate | Mean return |
+| ---------------- | ------------: | -------: | ----------: |
+| Value Iteration  |           200 |    0.710 |     208.665 |
+| Q-learning       |           200 |    0.630 |      49.660 |
+| Policy Iteration |           200 |    0.620 |     139.350 |
+| SARSA            |           200 |    0.575 |      -8.895 |
+
+Interpretation:
+
+* Value Iteration achieves the strongest task performance.
+* Policy Iteration and Q-learning are competitive but less stable.
+* SARSA wins in more than half of evaluation episodes but has lower mean return.
+* Standard performance metrics alone do not show how diverse the agents' successful routes are.
+
+---
+
+### Temporal Vendi Score evaluation
+
+TVS was computed for all supported policy families.
+
+| Policy           | Episodes | Scored trajectories | Win rate | Mean return |    TVS |
+| ---------------- | -------: | ------------------: | -------: | ----------: | -----: |
+| Random           |      256 |                 256 |    0.000 |    -526.540 | 13.910 |
+| SARSA            |      256 |                 152 |    0.594 |      12.450 | 11.930 |
+| Q-learning       |      256 |                 156 |    0.609 |      26.810 | 11.080 |
+| Value Iteration  |      256 |                 185 |    0.723 |     220.270 |  5.270 |
+| Policy Iteration |      256 |                 140 |    0.547 |      61.790 |  4.740 |
+| Baseline         |      256 |                  69 |    0.270 |    -267.340 |  2.260 |
+
+Interpretation:
+
+* Random policy has the highest TVS but zero win rate. This shows that diversity alone is not enough.
+* SARSA and Q-learning produce more diverse successful trajectories than the planning methods.
+* Value Iteration has the best reward and win rate, but lower TVS. It tends to follow more stable high-value routes.
+* Policy Iteration has moderate performance and moderate diversity.
+* Baseline has limited diversity because it follows a fixed heuristic route-selection pattern.
+
+The most important conclusion is:
+
+> TVS should be interpreted together with reward and win rate. A good agent should not only be diverse, but should produce diverse high-quality trajectories.
+
+---
+
+## Main output files
+
+After running the complete TVS evaluation, the most important files are:
 
 ```text
 results/tvs_all/tvs_summary.csv
 results/tvs_all/tvs_summary.json
 results/tvs_all/tvs_summary.png
-```
-
-Detailed notes and commands are in `docs/TVS_FULL_INTEGRATION.md`.
-
-### Article-aligned TVS check (latest)
-
-After a detailed check against the TVS paper, `scripts/evaluate_all_tvs.py` now uses **one shared sigma per environment by default**, calibrated from a strong policy (`vi`) and reused for all methods. This follows the paper's Appendix A.1 idea that sigma is calibrated once per environment, not separately per policy. Use `--per-policy-sigma` only for diagnostics.
-
-Additional report-ready visualizations are generated automatically:
-
-```text
 results/tvs_all/quality_diversity_scatter.png
 results/tvs_all/return_diversity_scatter.png
 results/tvs_all/coverage_entropy_tvs_comparison.png
+```
+
+For each policy, detailed outputs are stored in:
+
+```text
+results/tvs_all/<policy>/
+```
+
+Typical per-policy files:
+
+```text
+tvs_metrics.json
+similarity_matrix.npy
+similarity_matrix.png
+occupancy_heatmap.png
+trajectory_overlay.png
+tvs_convergence.json
+tvs_convergence.png
+trajectories.json
+```
+
+---
+
+## Visualizations
+
+The project generates several visualizations for analysis and presentation.
+
+### 1. TVS summary
+
+```text
+results/tvs_all/tvs_summary.png
+```
+
+Compares policies by Temporal Vendi Score.
+
+---
+
+### 2. Quality-diversity scatter
+
+```text
+results/tvs_all/quality_diversity_scatter.png
+```
+
+Shows the relationship between win rate and TVS.
+
+This is one of the most useful plots for the final report because it shows that:
+
+* Random is diverse but ineffective;
+* Value Iteration is effective but less diverse;
+* Q-learning and SARSA are more diverse among successful policies.
+
+---
+
+### 3. Return-diversity scatter
+
+```text
+results/tvs_all/return_diversity_scatter.png
+```
+
+Shows the relationship between mean return and TVS.
+
+---
+
+### 4. Coverage / entropy / TVS comparison
+
+```text
+results/tvs_all/coverage_entropy_tvs_comparison.png
+```
+
+Compares TVS against simpler diversity proxies such as state coverage and occupancy entropy.
+
+This is useful because simple state-level metrics can miss temporal differences between trajectories.
+
+---
+
+### 5. Trajectory overlay
+
+```text
 results/tvs_all/<policy>/trajectory_overlay.png
 ```
 
-`trajectory_overlay.png` is especially useful for presentations: it shows the actual route shapes used in the scored trajectories, complementing GIFs and the numerical TVS table.
+Shows actual route shapes used by a policy.
 
-See `docs/ARTICLE_ALIGNMENT_REVIEW.md` for the checklist mapping the paper's method to this Pacman implementation and the explicit limitations of the state projection.
+This is especially useful for presentation because it makes trajectory diversity visually interpretable.
 
-Optional appendix-style robustness check:
+---
+
+### 6. Occupancy heatmap
+
+```text
+results/tvs_all/<policy>/occupancy_heatmap.png
+```
+
+Shows how frequently the policy visits each grid cell.
+
+---
+
+### 7. Similarity matrix
+
+```text
+results/tvs_all/<policy>/similarity_matrix.png
+```
+
+Shows pairwise trajectory similarity. Block structure in this matrix can indicate clusters of similar behavioral modes.
+
+---
+
+### 8. TVS convergence
+
+```text
+results/tvs_all/<policy>/tvs_convergence.png
+```
+
+Shows how TVS changes as the number of sampled trajectories increases.
+
+---
+
+### 9. GIF rollouts
+
+GIFs provide qualitative examples of policy behavior.
+
+They are not the main TVS evidence, but they are useful for visual comparison in presentation.
+
+Output directory:
+
+```text
+results/important/
+```
+
+---
+
+## Installation
+
+### Windows PowerShell
+
+From the project root:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+Optional test run:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q --basetemp=.pytest_tmp
+```
+
+If pytest fails because of Windows temporary-folder permissions, this does not necessarily indicate a project-code error. The training and evaluation scripts can still be run directly.
+
+---
+
+## Training commands
+
+Run commands from the project root.
+
+### Q-learning
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train.py q_learning --config configs\q_learning.yaml --episodes 5000
+```
+
+### SARSA
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train.py sarsa --config configs\sarsa.yaml --episodes 5000
+```
+
+### Value Iteration
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train.py vi --config configs\bitmask_value_iteration.yaml --collection-episodes 1000 --max-iterations 300
+```
+
+### Policy Iteration
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train.py pi --config configs\policy_iteration_obs.yaml --episodes 5000
+```
+
+---
+
+## Evaluation commands
+
+### Q-learning
+
+```powershell
+.\.venv\Scripts\python.exe scripts\eval.py q_learning --config configs\q_learning.yaml --episodes 200 --no-gif --output-dir results\eval_q_learning
+```
+
+### SARSA
+
+```powershell
+.\.venv\Scripts\python.exe scripts\eval.py sarsa --config configs\sarsa.yaml --episodes 200 --no-gif --output-dir results\eval_sarsa
+```
+
+### Value Iteration
+
+```powershell
+.\.venv\Scripts\python.exe scripts\eval.py vi --config configs\bitmask_value_iteration.yaml --episodes 200 --no-gif --output-dir results\eval_vi
+```
+
+### Policy Iteration
+
+```powershell
+.\.venv\Scripts\python.exe scripts\eval.py pi --config configs\policy_iteration_obs.yaml --episodes 200 --no-gif --output-dir results\eval_pi
+```
+
+---
+
+## TVS evaluation commands
+
+### Evaluate TVS for all policies
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_all_tvs.py --episodes 256 --seed 42 --output-dir results\tvs_all --save-trajectories
+```
+
+This creates the main comparison table and visualizations.
+
+Main outputs:
+
+```text
+results/tvs_all/tvs_summary.csv
+results/tvs_all/tvs_summary.json
+results/tvs_all/tvs_summary.png
+results/tvs_all/quality_diversity_scatter.png
+results/tvs_all/return_diversity_scatter.png
+results/tvs_all/coverage_entropy_tvs_comparison.png
+```
+
+---
+
+### Evaluate TVS for one policy
+
+Example for Value Iteration:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_tvs.py --policy vi --episodes 256 --seed 42 --output-dir results\tvs_vi --save-trajectories
+```
+
+Example for Q-learning:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_tvs.py --policy q_learning --episodes 256 --seed 42 --output-dir results\tvs_q_learning --save-trajectories
+```
+
+Example for SARSA:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_tvs.py --policy sarsa --episodes 256 --seed 42 --output-dir results\tvs_sarsa --save-trajectories
+```
+
+Example for Policy Iteration:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_tvs.py --policy pi --episodes 256 --seed 42 --output-dir results\tvs_pi --save-trajectories
+```
+
+---
+
+### Baseline with additional randomization
+
+This run is useful to show the reward-diversity trade-off:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_tvs.py `
+  --policy baseline `
+  --epsilon-random 0.10 `
+  --episodes 256 `
+  --seed 42 `
+  --output-dir results\tvs_baseline_eps010 `
+  --save-trajectories
+```
+
+---
+
+## Optional robustness check
+
+The project includes a small robustness check for the TVS similarity matrix.
+
+It evaluates whether adding diagonal jitter to the similarity matrix changes the score significantly.
+
+Example for Value Iteration:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\analyze_tvs_robustness.py --matrix results\tvs_all\vi\similarity_matrix.npy --output-dir results\tvs_all\vi
 ```
+
+Outputs:
+
+```text
+results/tvs_all/vi/tvs_jitter_robustness.json
+results/tvs_all/vi/tvs_jitter_robustness.png
+```
+
+This is optional but useful as an appendix-style validation.
+
+---
+
+## GIF export
+
+For qualitative visual comparison, use `scripts/play.py`.
+
+GIFs are saved to:
+
+```text
+results/important/
+```
+
+### Q-learning GIF
+
+```powershell
+.\.venv\Scripts\python.exe scripts\play.py q_learning `
+  --config configs\q_learning.yaml `
+  --model results\train_q_learning\q_table.pkl `
+  --episodes 1 `
+  --seed 42 `
+  --gif-title q_learning_seed42
+```
+
+### SARSA GIF
+
+```powershell
+.\.venv\Scripts\python.exe scripts\play.py sarsa `
+  --config configs\sarsa.yaml `
+  --model results\train_sarsa\q_table.pkl `
+  --episodes 1 `
+  --seed 42 `
+  --gif-title sarsa_seed42
+```
+
+### Policy Iteration GIF
+
+```powershell
+.\.venv\Scripts\python.exe scripts\play.py pi `
+  --config configs\policy_iteration_obs.yaml `
+  --model results\obs_policy_iteration\policy.pkl `
+  --episodes 1 `
+  --seed 42 `
+  --gif-title pi_seed42
+```
+
+### Value Iteration GIF
+
+```powershell
+.\.venv\Scripts\python.exe scripts\play.py vi `
+  --config configs\bitmask_value_iteration.yaml `
+  --model results\train_food_bitmask_vi\model.pkl `
+  --episodes 1 `
+  --seed 42 `
+  --gif-title vi_seed42
+```
+
+---
+
+## Recommended final run order
+
+For a complete reproducible experiment:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train.py q_learning --config configs\q_learning.yaml --episodes 5000
+.\.venv\Scripts\python.exe scripts\train.py sarsa --config configs\sarsa.yaml --episodes 5000
+.\.venv\Scripts\python.exe scripts\train.py vi --config configs\bitmask_value_iteration.yaml --collection-episodes 1000 --max-iterations 300
+.\.venv\Scripts\python.exe scripts\train.py pi --config configs\policy_iteration_obs.yaml --episodes 5000
+```
+
+Then run standard evaluation:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\eval.py q_learning --config configs\q_learning.yaml --episodes 200 --no-gif --output-dir results\eval_q_learning
+.\.venv\Scripts\python.exe scripts\eval.py sarsa --config configs\sarsa.yaml --episodes 200 --no-gif --output-dir results\eval_sarsa
+.\.venv\Scripts\python.exe scripts\eval.py vi --config configs\bitmask_value_iteration.yaml --episodes 200 --no-gif --output-dir results\eval_vi
+.\.venv\Scripts\python.exe scripts\eval.py pi --config configs\policy_iteration_obs.yaml --episodes 200 --no-gif --output-dir results\eval_pi
+```
+
+Then run TVS evaluation:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_all_tvs.py --episodes 256 --seed 42 --output-dir results\tvs_all --save-trajectories
+```
+
+---
+
+## Project structure
+
+```text
+configs/
+  q_learning.yaml
+  sarsa.yaml
+  bitmask_value_iteration.yaml
+  policy_iteration_obs.yaml
+  tvs_eval.yaml
+
+scripts/
+  train.py
+  eval.py
+  play.py
+  evaluate_tvs.py
+  evaluate_all_tvs.py
+  analyze_tvs_robustness.py
+
+src/pacman_rldp/
+  env/
+  agents/
+  algorithms/
+  diversity/
+  third_party/
+
+results/
+  eval_q_learning/
+  eval_sarsa/
+  eval_vi/
+  eval_pi/
+  tvs_all/
+  important/
+
+tests/
+```
+
+---
+
+## Notes on interpretation
+
+TVS is not a replacement for reward. It measures a different property.
+
+A policy can have:
+
+* high reward and low diversity;
+* low reward and high diversity;
+* moderate reward and high diversity;
+* high reward and high diversity.
+
+Therefore, final conclusions should use both standard RL metrics and TVS.
+
+In the current experiments:
+
+* Value Iteration is the best method by win rate and mean return.
+* SARSA and Q-learning show higher diversity among scored trajectories.
+* Random policy shows that high diversity without task success is not sufficient.
+* Baseline demonstrates limited diversity caused by rule-based behavior.
+
+This supports the main conclusion of the project:
+
+> Evaluating RL agents only by reward hides important differences in behavior. Temporal Vendi Score makes it possible to compare not only how well agents solve the task, but also how many distinct trajectory strategies they use.
